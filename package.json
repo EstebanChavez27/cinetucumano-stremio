@@ -13,5 +13,8 @@
     "axios": "^1.7.7",
     "cheerio": "^1.0.0",
     "stremio-addon-sdk": "^1.6.2"
+  },
+  "devDependencies": {
+    "jimp": "^0.22.12"
   }
 }

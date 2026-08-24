@@ -59,31 +59,80 @@ function fetchWithCurl(url) {
       const marker = stdout.lastIndexOf('\n__CT_STATUS__');
       if (marker === -1) return resolve(null);
       const status = parseInt(stdout.slice(marker + 14).trim(), 10);
-      resolve({ status: Number.isNaN(status) ? 0 : status, body: stdout.slice(0, marker) });
+      resolve({ status: Number.isNaN(status) ? 0 : status, body: stdout.slice(0, marker), via: 'curl' });
     });
   });
 }
 
-/** Descarga el HTML del player probando curl primero y axios como fallback. */
-async function downloadPlayerHtml(url) {
-  let result = await fetchWithCurl(url);
-  if (result && result.status === 200 && result.body) return result;
-  result = await fetchWithCurl(url); // un reintento rápido ante fallo puntual
-  if (result && result.status === 200 && result.body) return result;
-
-  // Fallback: stack Node (puede ser bloqueado por JA3 según la IP/región).
+/** Descarga directa con axios (stack TLS de Node). */
+async function fetchWithAxios(url) {
   try {
     const res = await http.get(url, {
       headers: { Accept: 'text/html' },
       validateStatus: null
     });
+    return { status: res.status, body: typeof res.data === 'string' ? res.data : '', via: 'axios' };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Descarga vía r.jina.ai (relay gratuito con navegador headless).
+ *
+ * Vimeo bloquea las IPs de datacenter (Vercel, AWS, etc.) con Cloudflare
+ * Turnstile, pero la infraestructura de r.jina.ai sí logra renderizar el
+ * player. Con el header X-Return-Format: html devuelve el HTML crudo con
+ * window.playerConfig incluido. Sin API key: ~20 req/minuto en el tier free.
+ */
+async function fetchWithJina(url) {
+  try {
+    const res = await axios.get(`https://r.jina.ai/${url}`, {
+      timeout: 30000,
+      headers: { 'X-Return-Format': 'html', Accept: 'text/html' },
+      validateStatus: null
+    });
     return {
       status: res.status,
-      body: typeof res.data === 'string' ? res.data : ''
+      body: typeof res.data === 'string' ? res.data : '',
+      via: 'jina'
     };
   } catch {
     return null;
   }
+}
+
+const TRANSPORTS = { curl: fetchWithCurl, axios: fetchWithAxios, jina: fetchWithJina };
+
+// Orden de prueba de transportes. CT_RESOLVER permite forzar uno
+// (útil para diagnóstico: CT_RESOLVER=jina npm start).
+let transportOrder = (process.env.CT_RESOLVER || 'curl,axios,jina').split(',');
+
+// Memoria del transporte que funcionó la última vez: en un mismo entorno
+// (ej. Vercel) el ganador siempre será el mismo, así que lo probamos primero
+// y ahorramos segundos de latencia en cada resolución.
+let preferredTransport = null;
+
+/**
+ * Descarga el HTML del player probando los transportes en orden hasta
+ * obtener uno que traiga window.playerConfig (un 200 sin config no sirve:
+ * puede ser la página del desafío Turnstile).
+ */
+async function downloadPlayerHtml(url) {
+  const order = preferredTransport
+    ? [preferredTransport, ...transportOrder.filter((t) => t !== preferredTransport)]
+    : transportOrder;
+
+  for (const name of order) {
+    const fetcher = TRANSPORTS[name];
+    if (!fetcher) continue;
+    const result = await fetcher(url);
+    if (result && result.status === 200 && result.body && result.body.includes('window.playerConfig')) {
+      preferredTransport = name;
+      return result;
+    }
+  }
+  return null;
 }
 
 /**
@@ -156,12 +205,21 @@ async function fetchPlayerHtml(vimeoId, hash) {
 
 /**
  * Resuelve los streams de un video de Vimeo.
+ * Con caché de 10 minutos: las URLs firmadas viven ~1 hora, así que reusar
+ * una resolución reciente es seguro y evita golpear dos veces el relay
+ * (importante por los rate limits del tier gratuito de r.jina.ai).
  * @param {string|number} vimeoId
  * @returns {Promise<{streams: Array<{quality:string,url:string}>,
  *                    subtitles: Array<{url:string,lang:string,label:string}>,
  *                    duration:number|null}>}
  */
+const streamCache = new Map();
+const STREAM_CACHE_TTL = 10 * 60 * 1000;
+
 async function resolveStreams(vimeoId) {
+  const cached = streamCache.get(vimeoId);
+  if (cached && Date.now() < cached.expires) return cached.value;
+
   let videoMeta = await getVideoMeta(vimeoId);
 
   const extractHash = (meta) => {
@@ -180,14 +238,14 @@ async function resolveStreams(vimeoId) {
   // Si el hash está vencido o Vimeo aplica throttling transitorio responde
   // 401: esperamos brevemente, pedimos metadata fresca (sin caché) y
   // reintentamos una única vez.
-  if (status === 401) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+  if (status !== 200 || !html) {
+    await new Promise((resolve) => setTimeout(resolve, 800));
     videoMeta = await getVideoMeta(vimeoId, true);
     ({ status, html } = await fetchPlayerHtml(vimeoId, extractHash(videoMeta)));
   }
 
   if (status !== 200 || !html) {
-    throw new Error(`Player de Vimeo respondió ${status} para ${vimeoId}`);
+    throw new Error(`Player de Vimeo inaccesible (${status}) para ${vimeoId}`);
   }
 
   const config = extractPlayerConfig(html);
@@ -234,7 +292,86 @@ async function resolveStreams(vimeoId) {
 
   if (!streams.length) throw new Error(`No se pudo resolver stream para ${vimeoId}`);
 
-  return { streams, subtitles, duration };
+  const value = { streams, subtitles, duration };
+  streamCache.set(vimeoId, { value, expires: Date.now() + STREAM_CACHE_TTL });
+  return value;
 }
 
-module.exports = { resolveStreams };
+/**
+ * URL de reproducción externa (player embebido de Vimeo).
+ * Se usa como fallback cuando la resolución server-side falla: Vimeo aplica
+ * Cloudflare Turnstile contra IPs de datacenter (como las de Vercel), pero
+ * desde el navegador del usuario funciona siempre. El hash "h" es estable;
+ * lo efímero son solo las firmas CDN, que el player renueva por su cuenta.
+ */
+async function getEmbedUrl(vimeoId) {
+  try {
+    const meta = await getVideoMeta(vimeoId, true);
+    if (meta && meta.player_embed_url) return meta.player_embed_url;
+  } catch {
+    /* caemos al URL genérico */
+  }
+  return `https://player.vimeo.com/video/${vimeoId}`;
+}
+
+/** Verifica si el binario curl está disponible y devuelve su versión. */
+function checkCurl() {
+  return new Promise((resolve) => {
+    execFile('curl', ['--version'], { timeout: 8000 }, (err, stdout) => {
+      resolve(err ? { available: false } : { available: true, version: String(stdout).split('\n')[0] });
+    });
+  });
+}
+
+/**
+ * Diagnóstico paso a paso del entorno de red (usado por la ruta /debug).
+ * Permite ver desde el deployment real qué bloquea la resolución.
+ */
+async function diagnose(vimeoId = '1172680712') {
+  const out = {};
+
+  out.curl = await checkCurl();
+
+  const meta = await getVideoMeta(vimeoId, true).catch((e) => ({ error: e.message }));
+  let playerUrl = `https://player.vimeo.com/video/${vimeoId}`;
+  if (meta && meta.player_embed_url) {
+    out.siteApi = { ok: true, hash: new URL(meta.player_embed_url).searchParams.get('h') };
+    playerUrl = meta.player_embed_url;
+  } else {
+    out.siteApi = { ok: false, detail: meta };
+  }
+
+  const t0 = Date.now();
+  const viaCurl = await fetchWithCurl(playerUrl);
+  out.playerViaCurl = {
+    status: viaCurl ? viaCurl.status : null,
+    ms: Date.now() - t0,
+    hasConfig: Boolean(viaCurl && viaCurl.body && viaCurl.body.includes('window.playerConfig'))
+  };
+
+  const t1 = Date.now();
+  try {
+    const res = await http.get(playerUrl, {
+      headers: { Accept: 'text/html' },
+      validateStatus: null
+    });
+    out.playerViaAxios = { status: res.status, ms: Date.now() - t1 };
+  } catch (err) {
+    out.playerViaAxios = { error: err.message };
+  }
+
+  const t2 = Date.now();
+  const viaJina = await fetchWithJina(playerUrl);
+  out.playerViaJina = {
+    status: viaJina ? viaJina.status : null,
+    ms: Date.now() - t2,
+    hasConfig: Boolean(viaJina && viaJina.body && viaJina.body.includes('window.playerConfig'))
+  };
+  out.transportOrder = transportOrder;
+  out.preferredTransport = preferredTransport;
+
+  out.playerUrl = playerUrl;
+  return out;
+}
+
+module.exports = { resolveStreams, getEmbedUrl, diagnose };

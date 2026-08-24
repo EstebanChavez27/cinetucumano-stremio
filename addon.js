@@ -19,13 +19,20 @@ const vimeo = require('./vimeo');
 /* Manifest                                                                   */
 /* -------------------------------------------------------------------------- */
 
+// En Vercel servimos nuestro propio ícono (assets/logo.png vía /logo.png).
+// VERCEL_URL es la variable automática del deployment (<proyecto>.vercel.app).
+// Fuera de Vercel usamos el ícono oficial hospedado por la plataforma.
+const LOGO_URL = process.env.VERCEL_URL
+  ? `https://${process.env.VERCEL_URL}/logo.png`
+  : 'https://cinetucumano.com.ar/icon512_rounded.png';
+
 const MANIFEST = {
   id: 'org.cinetucumano.stremio',
-  version: '1.0.0',
+  version: '1.1.0',
   name: 'Cine Tucumano',
   description: 'Catálogo de películas y series de la plataforma web cinetucumano.com.ar',
-  logo: 'https://cinetucumano.com.ar/logos/cineTucumano_negro.png',
-  background: 'https://cinetucumano.com.ar/logos/cineTucumano_negro.png',
+  logo: LOGO_URL,
+  background: LOGO_URL,
   // TODO: confirmar un email real de contacto antes de publicar el add-on.
   contactEmail: 'contacto@cinetucumano.com.ar',
   resources: ['catalog', 'meta', 'stream'],
@@ -247,8 +254,21 @@ builder.defineStreamHandler(async (args) => {
 
     return { streams: stremioStreams };
   } catch (err) {
-    console.error(`[stream] Error resolviendo ${id}:`, err.message);
-    return { streams: [] };
+    // Vimeo bloquea la resolución server-side desde IPs de datacenter
+    // (Cloudflare Turnstile). Fallback: reproducir en el navegador, donde
+    // el player de Vimeo funciona sin restricciones.
+    console.error(`[stream] HLS no disponible para ${id} (${err.message}); usando fallback externo`);
+    const embedUrl = await vimeo.getEmbedUrl(vimeoId);
+    return {
+      streams: [
+        {
+          title: 'Cine Tucumano\nVer en el navegador (Vimeo)',
+          name: 'Vimeo',
+          description: 'Reproducción externa: el servidor no puede resolver HLS desde su IP',
+          externalUrl: embedUrl
+        }
+      ]
+    };
   }
 });
 
