@@ -19,16 +19,20 @@ const vimeo = require('./vimeo');
 /* Manifest                                                                   */
 /* -------------------------------------------------------------------------- */
 
-// En Vercel servimos nuestro propio ícono (assets/logo.png vía /logo.png).
-// VERCEL_URL es la variable automática del deployment (<proyecto>.vercel.app).
-// Fuera de Vercel usamos el ícono oficial hospedado por la plataforma.
-const LOGO_URL = process.env.VERCEL_URL
-  ? `https://${process.env.VERCEL_URL}/logo.png`
+// Ícono del add-on: en producción se sirve assets/logo.png vía /logo.png.
+// ADDON_PUBLIC_URL permite fijar el dominio estable (ej. https://mi-addon.vercel.app)
+// porque VERCEL_URL devuelve el dominio único de cada deployment. Si no hay
+// ninguno (desarrollo local), usamos el ícono oficial hospedado por la plataforma.
+const LOGO_BASE =
+  process.env.ADDON_PUBLIC_URL ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '');
+const LOGO_URL = LOGO_BASE
+  ? `${LOGO_BASE.replace(/\/$/, '')}/logo.png`
   : 'https://cinetucumano.com.ar/icon512_rounded.png';
 
 const MANIFEST = {
   id: 'org.cinetucumano.stremio',
-  version: '1.1.0',
+  version: '1.1.1',
   name: 'Cine Tucumano',
   description: 'Catálogo de películas y series de la plataforma web cinetucumano.com.ar',
   logo: LOGO_URL,

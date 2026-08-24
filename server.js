@@ -52,15 +52,21 @@ function debugHandler(req, res) {
 
 // Cabeceras de caché en el CDN de Vercel: alivian las cold starts y reducen
 // el tráfico hacia cinetucumano.com.ar sin servir contenido rancio.
+// Los streams se cachean menos: sus URLs firmadas expiran en ~1 hora y durante
+// una incidencia no queremos servir respuestas vacías rancias.
 function withCacheHeaders(handler) {
   return function (req, res) {
     const urlPath = (req.url || '').split('?')[0];
     if (urlPath === '/debug') return debugHandler(req, res);
     if (urlPath === '/logo.png') return logoHandler(req, res);
-    res.setHeader(
-      'Cache-Control',
-      'public, max-age=300, s-maxage=600, stale-while-revalidate=3600'
-    );
+    if (urlPath.startsWith('/stream/')) {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=120');
+    } else {
+      res.setHeader(
+        'Cache-Control',
+        'public, max-age=300, s-maxage=600, stale-while-revalidate=3600'
+      );
+    }
     return handler(req, res);
   };
 }

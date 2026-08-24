@@ -73,6 +73,26 @@ El add-on no almacena nada: cada consulta lee en vivo la API del sitio. Cuando c
 
 3. Acepta e instala. El catálogo aparece en la sección "Add-ons" de Stremio.
 
+### Solución de problemas
+
+**Stremio cachea las respuestas de los add-ons.** Si actualizaste el add-on y seguís viendo estados viejos (sin streams, ícono anterior):
+
+1. **Eliminá el add-on** por completo en Stremio (Add-ons → Cine Tucumano → Eliminar).
+2. **Reinstalalo con la URL cache-busteada** (cambiá el número si repetís):
+
+   ```
+   https://<tu-deployment>.vercel.app/manifest.json?v=2
+   ```
+
+   Stremio trata esa URL como un add-on distinto, ignorando cualquier caché previa.
+
+3. Verificá en un navegador que el deployment responda bien:
+   - `/manifest.json` → el campo `logo` debe apunt a un PNG que cargue.
+   - `/stream/movie/ct_1172680712.json` → debe incluir una URL de `vimeocdn.com`.
+   - `/debug` → `playerViaJina.hasConfig` debe ser `true`.
+
+**Ícono con dominio estable:** en Vercel, definí la variable de entorno `ADDON_PUBLIC_URL=https://<tu-proyecto>.vercel.app` (Settings → Environment Variables). Sin ella se usa el dominio único de cada deployment, que funciona pero cambia en cada redeploy.
+
 ## Desarrollo local
 
 Requiere Node.js >= 18.
