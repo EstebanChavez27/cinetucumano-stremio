@@ -30,7 +30,14 @@ function withCacheHeaders(handler) {
 
 if (IS_VERCEL) {
   // Exportamos la función para las Serverless Functions de Vercel.
-  module.exports = withCacheHeaders((req, res) => router(req, res));
+  // El router del SDK tiene firma (req, res, next): le pasamos un
+  // callback final que responde 404 si ninguna ruta coincidió.
+  module.exports = withCacheHeaders((req, res) => {
+    router(req, res, () => {
+      res.statusCode = 404;
+      res.end('Not found');
+    });
+  });
 } else {
   // Desarrollo local: exportamos también por si se requiere integrar
   // en otro servidor, y arrancamos el listener interactivo del SDK

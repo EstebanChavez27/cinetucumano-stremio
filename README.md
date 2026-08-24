@@ -75,11 +75,12 @@ https://<tu-proyecto>.vercel.app/manifest.json
 
 | Archivo | Descripción |
 |---|---|
+| `api/index.js` | Punto de entrada de la Serverless Function de Vercel |
 | `addon.js` | Manifest y handlers (`catalog`, `meta`, `stream`) |
 | `scraper.js` | Acceso a la API del sitio + caché TTL + fallback HTML |
 | `vimeo.js` | Resolución de streams HLS/MP4 y subtítulos de Vimeo |
 | `server.js` | Entrada dual: serverless (Vercel) / `serveHTTP` (local) |
-| `vercel.json` | Configuración de rutas para Vercel |
+| `vercel.json` | Rewrites: todas las rutas apuntan a `/api/index` |
 
 ### Esquema de IDs internos
 
