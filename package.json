@@ -1,0 +1,17 @@
+{
+  "name": "stremio-cinetucumano",
+  "version": "1.0.0",
+  "description": "Add-on de Stremio para el catálogo de cinetucumano.com.ar",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "cheerio": "^1.0.0",
+    "stremio-addon-sdk": "^1.6.2"
+  }
+}
