@@ -111,6 +111,29 @@ function statusHandler(res) {
 // Los streams se cachean poco: sus URLs firmadas expiran en ~1 hora.
 function requestHandler(req, res) {
   const urlPath = (req.url || '').split('?')[0];
+
+  // CORS universal: Stremio web/Electron hace fetch del manifest y de los
+  // streams desde contexto browser; sin Access-Control-Allow-Origin el
+  // cliente falla con "Failed to fetch" aunque el endpoint responda 200.
+  // Se fija ANTES del router para cubrir también las rutas custom
+  // (/manifest.json, /debug, /logo.png); el router reescribe el mismo
+  // header en sus rutas sin duplicarlo.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Accept, Range, Origin'
+  );
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
+  if (urlPath !== '/logo.png') {
+    console.log(`[http] ${req.method} ${req.url || urlPath}`);
+  }
+
   if (urlPath === '/') return statusHandler(res);
   if (urlPath === '/manifest.json') return manifestHandler(req, res);
   if (urlPath === '/debug') return debugHandler(req, res);
