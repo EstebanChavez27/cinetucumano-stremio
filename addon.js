@@ -19,20 +19,23 @@ const vimeo = require('./vimeo');
 /* Manifest                                                                   */
 /* -------------------------------------------------------------------------- */
 
-// Ícono del add-on: en producción se sirve assets/logo.png vía /logo.png.
-// ADDON_PUBLIC_URL permite fijar el dominio estable (ej. https://mi-addon.vercel.app)
-// porque VERCEL_URL devuelve el dominio único de cada deployment. Si no hay
-// ninguno (desarrollo local), usamos el ícono oficial hospedado por la plataforma.
-const LOGO_BASE =
-  process.env.ADDON_PUBLIC_URL ||
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '');
-const LOGO_URL = LOGO_BASE
-  ? `${LOGO_BASE.replace(/\/$/, '')}/logo.png`
-  : 'https://cinetucumano.com.ar/icon512_rounded.png';
+// Dominio público ESTABLE del add-on, hardcodeado a propósito.
+// No usar VERCEL_URL: devuelve el dominio único de cada deployment
+// (<proyecto>-<hash>-<team>.vercel.app), que Vercel protege con
+// autenticación (302) y Stremio no puede cargar. El dominio de
+// producción (alias del último deploy de la rama principal) sí es público.
+// Si cambiás de dominio, actualizá esta constante o definí la variable
+// de entorno ADDON_PUBLIC_URL, que tiene prioridad.
+const PUBLIC_URL = (
+  process.env.ADDON_PUBLIC_URL || 'https://cinetucumano-stremio.vercel.app'
+).replace(/\/$/, '');
+const LOGO_URL = `${PUBLIC_URL}/logo.png`;
 
 const MANIFEST = {
-  id: 'org.cinetucumano.stremio',
-  version: '1.1.1',
+  // ID v2: al cambiarlo, Stremio lo trata como un add-on nuevo y descarta
+  // cualquier caché de la versión anterior (streams vacíos, logo viejo).
+  id: 'org.cinetucumano.stremio.v2',
+  version: '1.2.0',
   name: 'Cine Tucumano',
   description: 'Catálogo de películas y series de la plataforma web cinetucumano.com.ar',
   logo: LOGO_URL,

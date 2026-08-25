@@ -75,23 +75,17 @@ El add-on no almacena nada: cada consulta lee en vivo la API del sitio. Cuando c
 
 ### Solución de problemas
 
-**Stremio cachea las respuestas de los add-ons.** Si actualizaste el add-on y seguís viendo estados viejos (sin streams, ícono anterior):
+**Stremio cachea las respuestas de los add-ons.** Si después de actualizar el código seguís viendo estados viejos (sin streams, ícono anterior):
 
 1. **Eliminá el add-on** por completo en Stremio (Add-ons → Cine Tucumano → Eliminar).
-2. **Reinstalalo con la URL cache-busteada** (cambiá el número si repetís):
+2. Reinstalalo desde `https://<tu-deployment>.vercel.app/manifest.json`. Si el problema persiste, agregá un parámetro a la URL (`/manifest.json?v=2`): Stremio lo trata como un add-on distinto y descarta toda caché.
 
-   ```
-   https://<tu-deployment>.vercel.app/manifest.json?v=2
-   ```
-
-   Stremio trata esa URL como un add-on distinto, ignorando cualquier caché previa.
-
-3. Verificá en un navegador que el deployment responda bien:
-   - `/manifest.json` → el campo `logo` debe apunt a un PNG que cargue.
-   - `/stream/movie/ct_1172680712.json` → debe incluir una URL de `vimeocdn.com`.
-   - `/debug` → `playerViaJina.hasConfig` debe ser `true`.
-
-**Ícono con dominio estable:** en Vercel, definí la variable de entorno `ADDON_PUBLIC_URL=https://<tu-proyecto>.vercel.app` (Settings → Environment Variables). Sin ella se usa el dominio único de cada deployment, que funciona pero cambia en cada redeploy.
+**Notas técnicas:**
+- El ícono se sirve desde el propio add-on en `/logo.png`. El dominio está hardcodeado en `addon.js` (constante `PUBLIC_URL`) porque los dominios únicos de cada deployment de Vercel están protegidos con autenticación (responden 302) y Stremio no puede cargarlos. Si cambiás el nombre del proyecto en Vercel, actualizá esa constante.
+- Verificá en un navegador que el deployment responda bien:
+  - `/manifest.json` → el campo `logo` debe apuntar a un PNG que cargue.
+  - `/stream/movie/ct_1172680712.json` → debe incluir una URL de `vimeocdn.com`.
+  - `/debug` → `playerViaJina.hasConfig` debe ser `true`.
 
 ## Desarrollo local
 
