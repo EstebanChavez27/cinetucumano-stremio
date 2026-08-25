@@ -295,23 +295,34 @@ builder.defineStreamHandler(async (args) => {
   try {
     const { streams, subtitles } = await vimeo.resolveStreams(vimeoId);
 
-    const stremioStreams = streams.map((stream) => ({
-      title: 'Cine Tucumano',
-      name: stream.quality,
-      description: `${type === 'series' ? 'Episodio' : 'Película'} vía cinetucumano.com.ar`,
-      url: stream.url,
-      // El esquema de Stremio exige notWebReady para URLs que no son MP4
-      // directo (nuestro HLS/m3u8): sin esto, los clientes descartan el stream.
-      behaviorHints: { notWebReady: true },
-      // El esquema Subtitle exige `id` (required); sin él la respuesta puede
-      // invalidarse entera.
-      subtitles: subtitles.map((sub, i) => ({
-        id: `ct-sub-${i}`,
-        url: sub.url,
-        lang: sub.lang,
-        label: sub.label
-      }))
-    }));
+    // Modo diagnóstico CT_STREAM_MINIMAL=1: emite el stream más mínimo posible
+    // (name/title/url). Si con esto el cliente muestra transmisiones, el
+    // culpable del descarte es algún campo extra (subtitles/behaviorHints).
+    const minimal = process.env.CT_STREAM_MINIMAL === '1';
+
+    const stremioStreams = streams.map((stream) => {
+      const base = {
+        title: 'Cine Tucumano',
+        name: stream.quality,
+        url: stream.url
+      };
+      if (minimal) return base;
+      return {
+        ...base,
+        description: `${type === 'series' ? 'Episodio' : 'Película'} vía cinetucumano.com.ar`,
+        // El esquema de Stremio exige notWebReady para URLs que no son MP4
+        // directo (nuestro HLS/m3u8): sin esto, los clientes descartan el stream.
+        behaviorHints: { notWebReady: true },
+        // El esquema Subtitle exige `id` (required); sin él la respuesta puede
+        // invalidarse entera.
+        subtitles: subtitles.map((sub, i) => ({
+          id: `ct-sub-${i}`,
+          url: sub.url,
+          lang: sub.lang,
+          label: sub.label
+        }))
+      };
+    });
 
     return { streams: stremioStreams };
   } catch (err) {

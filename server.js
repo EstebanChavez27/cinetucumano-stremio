@@ -119,7 +119,10 @@ function statusHandler(res) {
 /* muere al terminar el request.                                               */
 
 const WARM_LIMIT = parseInt(process.env.CT_WARM_LIMIT, 10) || 10;
-const WARM_DELAY_MS = 900; // respeta el rate limit del relay (~20 req/min)
+// El relay gratuito acepta ~20 req/min: 3s entre pre-resoluciones lo respeta.
+// Si se acelera, jina empieza a responder 429 y la failCache envenena justo
+// los videos que el usuario va a clickear.
+const WARM_DELAY_MS = parseInt(process.env.CT_WARM_DELAY_MS, 10) || 3000;
 const warmed = new Set();
 let warming = false;
 
