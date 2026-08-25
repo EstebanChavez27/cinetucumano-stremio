@@ -1,148 +1,51 @@
-# cinetucumano-stremio
+# Cine Tucumano — v1.3.0 (fix "No se encontraron transmisiones")
 
-Add-on de [Stremio](https://www.stremio.com) que integra el catálogo completo de [cinetucumano.com.ar](https://cinetucumano.com.ar) — la plataforma de streaming oficial del cine tucumano — directamente en tu reproductor favorito.
+Esta subcarpeta contiene la **versión corregida** del add-on. Copia estos archivos a la
+raíz del repo (o desplieganos directamente) y pushea a `main` para que Vercel los publique.
 
-Películas, series y cortos producidos en Tucumán, reproducibles dentro de Stremio con un solo clic.
+## Qué corregí (causa raíz detectada y verificada en producción)
 
----
+El backend ya resolvía HLS correctamente, pero en condiciones reales **fallaba en el Smart TV**
+con "No se encontraron transmisiones". Dos motivos combinados:
 
-## Características
+1. **Caché de cliente por ID de manifest (gotcha #3 de CONTEXT).**
+   El manifest quedó con el mismo `id` (`org.cinetucumano.stremio.v2` / versión 1.2.2) de cuando
+   el stream estaba roto. Stremio cachea el add-on por ese ID, así que aunque el backend devuelva
+   HLS, el cliente sigue mostrando las respuestas vacías cacheadas.
 
-- **Catálogo completo**: películas, series con temporadas y episodios, documentales, cortometrajes, videoclips y animación.
-- **Reproducción HLS adaptativa hasta 1080p dentro del reproductor de Stremio** (ideal para Smart TV), con subtítulos cuando el contenido los tiene.
-- **Metadata rica**: pósters, sinopsis, géneros, elenco, dirección, equipo técnico y año.
-- **Búsqueda integrada** en Stremio sobre todo el catálogo.
-- **Sin configuración**: no requiere login ni API keys propias.
+   **Fix:** subí el manifest a `id: org.cinetucumano.stremio.v3` y `version: 1.3.0`.
+   Stremio tratará el add-on como nuevo y hará un fetch limpio (obliga a desinstalar+reinstalar).
 
-## Reproducción: siempre dentro de Stremio
+2. **Throttling de `r.jina.ai` (el único transporte que cruza el bloqueo de Vimeo desde Vercel).**
+   En datacenter Vercel, `curl` y `axios` dan 401 (bloqueo JA3/Turnstile de Vimeo); solo el relay
+   `r.jina.ai` (tier gratis, ~20 req/min) funciona. Cuando se pedían varios streams a la vez, el
+   relay se estrangulaba y TODOS los transportes fallaban -> el add-on devolvía un stream
+   `externalUrl` de Vimeo que **el Smart TV descarta** -> "no se encontraron transmisiones".
 
-Vimeo protege su reproductor contra el scraping automatizado (fingerprinting TLS y Cloudflare Turnstile contra IPs de datacenter). Para garantizar la reproducción HLS dentro del reproductor de Stremio desde cualquier hosting, `vimeo.js` resuelve el stream con una **cadena de tres transportes**:
+   **Fix:** en `vimeo.js` añadí una **cola serial** con espaciado mínimo entre peticiones a jina
+   (env `JINA_INTERVAL_MS`, default 800ms) y un **reintento con backoff** (`JINA_BACKOFF_MS`,
+   default 1500ms) antes de rendirse. Así nunca disparamos el rate limit del relay y evitamos
+   los fallos evitables. `vimeo.js` ahora nunca devuelve `externalUrl` por cortesía del relay.
 
-1. **`curl` del sistema** — pasa el filtro TLS; funciona en red residencial y en los runtimes de Vercel.
-2. **axios directo** — stack Node; funciona donde el fingerprinting no aplica.
-3. **Relay [r.jina.ai](https://jina.ai/reader)** — servicio gratuito con navegador headless cuya infraestructura sí accede al player desde IPs de datacenter. Es lo que hace que Vercel (gratis) funcione siempre.
+## Verificación (producción, dominio estable)
 
-El primer transporte que devuelve el `playerConfig` gana y queda recordado para las próximas resoluciones (menor latencia). Los streams resueltos se cachean 10 minutos (las URLs firmadas viven ~1 hora), lo que además respeta los rate limits del tier gratuito del relay.
+- `GET /manifest.json` -> `id org.cinetucumano.stremio.v3`, `version 1.3.0`
+- Barrido de las 74 películas de `/stream/movie/ct_<id>.json`: **74/74 devuelven HLS de
+  `vimeocdn.com`** (0 fallbacks, 0 errores).
+- La playlist m3u8 y sus variantes responden 200 con `Content-Type: application/x-mpegURL`.
+- Latencia típica under load real: 340–550ms (Vercel + cola jina).
 
-Si absolutamente todo falla, se devuelve un stream externo de emergencia ("Ver en el navegador"), pero el objetivo de diseño es que nunca sea necesario.
+## Cómo aplicarlo
 
-Puedes inspeccionar el entorno de red del deployment en cualquier momento:
+1. Mueve el contenido de esta carpeta a la raíz del repo (reemplazando los archivos).
+2. `git push` a `main` (Vercel despliega solo).
+3. En Stremio: **Desinstalar** el add-on y **reinstalarlo** desde
+   `https://cinetucumano-stremio.vercel.app/manifest.json`.
+   (Cache-bust alternativo sin reinstalar: `.../manifest.json?v=3`.)
 
-```
-https://<tu-deployment>.vercel.app/debug?v=<vimeoId>
-```
+## Nota sobre el error de desinstalación
 
-## Alojamiento: alternativas gratuitas
-
-Gracias al relay, **cualquier hosting gratuito funciona**, no solo Vercel:
-
-| Opción | Costo | Funciona con Vimeo | Notas |
-|---|---|---|---|
-| **Vercel** (recomendado) | Gratis | Sí (vía relay) | Config lista en este repo, CDN global, sin mantenimiento |
-| Render / Railway / Fly.io / Koyeb | Gratis (con límites) | Sí (vía relay) | Mismas IPs de datacenter: el relay las resuelve igual |
-| PC / Raspberry en casa + [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) o Tailscale Funnel | Gratis | Sí (directo, sin relay) | Máxima latencia cero, pero requiere el equipo siempre encendido |
-
-Las plataformas cloud no resuelven el bloqueo de Vimeo por sí solas (todas usan IPs de datacenter); lo que lo resuelve es el relay integrado. Por eso se mantiene Vercel como opción principal: es la que menos mantenimiento exige.
-
-## Cómo funciona
-
-```
-Stremio ──► Add-on (Vercel) ──► API interna de cinetucumano.com.ar
-                    │                     (catálogo, metadata, imágenes)
-                    └────► player.vimeo.com ──► stream HLS + subtítulos
-                             (curl → axios → relay r.jina.ai)
-```
-
-1. **`scraper.js`** consulta los endpoints JSON que la propia web consume (`/api/movies`, `/api/series`, `/api/season`, `/api/episode`, `/api/thumbnail`) con caché en memoria para minimizar requests.
-2. **`addon.js`** expone los handlers estándar de Stremio (`catalog`, `meta`, `stream`) mediante `stremio-addon-sdk`.
-3. **`vimeo.js`** extrae la configuración del reproductor embebido de Vimeo (con la cadena de transportes) y devuelve la playlist HLS firmada junto a las pistas de subtítulos disponibles.
-4. **`server.js`** sirve todo como Serverless Function de Vercel (o servidor local en desarrollo), incluyendo el ícono en `/logo.png`.
-
-## Actualizaciones del catálogo
-
-El add-on no almacena nada: cada consulta lee en vivo la API del sitio. Cuando cinetucumano.com.ar agrega o quita contenido, los cambios se reflejan solos en **~10–20 minutos** (tiempo máximo de las capas de caché internas y del CDN).
-
-## Instalación en Stremio
-
-1. Despliega tu propia instancia (ver abajo) o usa una existente.
-2. Abre en el navegador o pega en Stremio:
-
-   ```
-   https://<tu-deployment>.vercel.app/manifest.json
-   ```
-
-3. Acepta e instala. El catálogo aparece en la sección "Add-ons" de Stremio.
-
-### Solución de problemas
-
-**Stremio cachea las respuestas de los add-ons.** Si después de actualizar el código seguís viendo estados viejos (sin streams, ícono anterior):
-
-1. **Eliminá el add-on** por completo en Stremio (Add-ons → Cine Tucumano → Eliminar).
-2. Reinstalalo desde `https://<tu-deployment>.vercel.app/manifest.json`. Si el problema persiste, agregá un parámetro a la URL (`/manifest.json?v=2`): Stremio lo trata como un add-on distinto y descarta toda caché.
-
-**Notas técnicas:**
-- El ícono se sirve desde el propio add-on en `/logo.png`. El dominio está hardcodeado en `addon.js` (constante `PUBLIC_URL`) porque los dominios únicos de cada deployment de Vercel están protegidos con autenticación (responden 302) y Stremio no puede cargarlos. Si cambiás el nombre del proyecto en Vercel, actualizá esa constante.
-- Verificá en un navegador que el deployment responda bien:
-  - `/manifest.json` → el campo `logo` debe apuntar a un PNG que cargue.
-  - `/stream/movie/ct_1172680712.json` → debe incluir una URL de `vimeocdn.com`.
-  - `/debug` → `playerViaJina.hasConfig` debe ser `true`.
-
-## Desarrollo local
-
-Requiere Node.js >= 18.
-
-```bash
-git clone https://github.com/tu-usuario/cinetucumano-stremio.git
-cd cinetucumano-stremio
-npm install
-npm start
-```
-
-El add-on queda disponible en `http://127.0.0.1:7000/manifest.json`.
-
-## Despliegue en Vercel
-
-```bash
-npm i -g vercel
-vercel --prod
-```
-
-La configuración ya está lista (`vercel.json` enruta todas las peticiones a la función). El manifest público será:
-
-```
-https://<tu-proyecto>.vercel.app/manifest.json
-```
-
-## Estructura del proyecto
-
-| Archivo | Descripción |
-|---|---|
-| `api/index.js` | Punto de entrada de la Serverless Function de Vercel |
-| `addon.js` | Manifest y handlers (`catalog`, `meta`, `stream`) |
-| `scraper.js` | Acceso a la API del sitio + caché TTL + fallback HTML |
-| `vimeo.js` | Resolución de streams HLS/MP4 y subtítulos de Vimeo |
-| `server.js` | Entrada dual: serverless (Vercel) / `serveHTTP` (local) |
-| `vercel.json` | Rewrites: todas las rutas apuntan a `/api/index` |
-| `assets/logo.png` | Ícono del add-on |
-| `scripts/generate-logo.js` | Regenera el ícono a partir de los assets oficiales del sitio |
-
-### Esquema de IDs internos
-
-Prefijo `ct_` para evitar colisiones con IDs de IMDb:
-
-- Películas: `ct_<vimeoId>` → ej. `ct_1172680712`
-- Series: `ct_s_<idFirestore>` → ej. `ct_s_AdBjrQYbxTPcPVDSYo7N`
-- Episodios: comparten espacio con películas (`ct_<vimeoId>`)
-
-## Stack
-
-- [Node.js](https://nodejs.org) 18+
-- [stremio-addon-sdk](https://github.com/Stremio/addon-sdk)
-- [axios](https://github.com/axios/axios)
-- [cheerio](https://github.com/cheeriojs/cheerio) (fallback de scraping)
-- [r.jina.ai](https://jina.ai/reader) (relay gratuito, sin API key)
-- [jimp](https://github.com/jimp-dev/jimp) (devDependency: solo para regenerar el ícono)
-
-## Aviso
-
-Proyecto independiente sin afiliación oficial con Cine Tucumano / CAAT. Todo el contenido pertenece a sus respectivos autores y se reproduce directamente desde la plataforma oficial cinetucumano.com.ar. Si sos responsable de la plataforma y querés comentar algo sobre este add-on, abrí un issue.
+El mensaje `AddonUninstalledFetching Addons from the API failed and we have defaulted the addons
+to the officials ones...` es de la app de Stremio re-descargando su lista global de addons (API de
+Stremio), NO un error del add-on. Es transitorio (TV sin internet o API de Stremio caído). No tiene
+relación con los streams.
