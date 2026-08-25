@@ -9,6 +9,9 @@
  *   Serie    :  ct_s_<idFirestore>      ej: ct_s_AdBjrQYbxTPcPVDSYo7N
  *   Episodio :  ct_<vimeoId>            (mismo espacio que películas:
  *                                        la resolución de stream es idéntica)
+ *
+ * En el handler de streams se aceptan además variantes que agregan los
+ * clientes: "ct_<vimeoId>:<temp>:<ep>" y "ct_s_<idFirestore>:<temp>:<ep>".
  */
 
 const { addonBuilder } = require('stremio-addon-sdk');
@@ -35,7 +38,7 @@ const MANIFEST = {
   // ID v2: al cambiarlo, Stremio lo trata como un add-on nuevo y descarta
   // cualquier caché de la versión anterior (streams vacíos, logo viejo).
   id: 'org.cinetucumano.stremio.v2',
-  version: '1.2.1',
+  version: '1.2.2',
   name: 'Cine Tucumano',
   description: 'Catálogo de películas y series de la plataforma web cinetucumano.com.ar',
   logo: LOGO_URL,
@@ -236,6 +239,25 @@ builder.defineMetaHandler(async (args) => {
   return Promise.resolve({ meta });
 });
 
+/**
+ * Resuelve el vimeoId de un episodio a partir del ID de la serie y sus números
+ * de temporada/episodio. Necesario porque algunos clientes reconstruyen el ID
+ * como <idDeSerie>:<temp>:<ep> en vez de usar el video.id que expone el meta.
+ */
+async function episodeVimeoId(firestoreId, seasonNum, episodeNum) {
+  const seasons = await scraper.getSeasons(firestoreId);
+  seasons.sort((a, b) => (a.order || 0) - (b.order || 0));
+  const season =
+    seasons.find((s, i) => (s.order || i + 1) === seasonNum) || seasons[seasonNum - 1];
+  if (!season) return null;
+  const episodes = await scraper.getEpisodes(season.id);
+  episodes.sort((a, b) => (a.order || 0) - (b.order || 0));
+  const ep =
+    episodes.find((e, i) => (e.order || i + 1) === episodeNum) ||
+    episodes[episodeNum - 1];
+  return ep && ep.videoId ? String(ep.videoId) : null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Handler de Streams                                                         */
 /* -------------------------------------------------------------------------- */
@@ -243,9 +265,29 @@ builder.defineMetaHandler(async (args) => {
 builder.defineStreamHandler(async (args) => {
   const { type, id } = args;
 
-  // El ID siempre termina siendo ct_<vimeoId> (películas y episodios).
-  if (!id.startsWith('ct_') || id.startsWith('ct_s_')) return { streams: [] };
-  const vimeoId = id.replace(/^ct_/, '');
+  // El ID llega en varios formatos según el cliente:
+  //   ct_<vimeoId>                  -> película o episodio (formato canónico)
+  //   ct_<vimeoId>:<temp>:<ep>      -> clientes que agregan temporada/episodio
+  //   ct_s_<idFirestore>:<t>:<e>    -> clientes que reconstruyen el ID desde la serie
+  // Normalizamos siempre a un vimeoId limpio antes de resolver.
+  const [baseId, sPart, ePart] = id.split(':');
+  if (!baseId.startsWith('ct_')) return { streams: [] };
+
+  let vimeoId;
+  if (baseId.startsWith('ct_s_')) {
+    const seasonNum = parseInt(sPart, 10);
+    const episodeNum = parseInt(ePart, 10);
+    if (!seasonNum || !episodeNum) return { streams: [] };
+    vimeoId = await episodeVimeoId(
+      baseId.replace(/^ct_s_/, ''),
+      seasonNum,
+      episodeNum
+    ).catch(() => null);
+  } else {
+    vimeoId = baseId.replace(/^ct_/, '');
+  }
+
+  if (!vimeoId) return { streams: [] };
 
   try {
     const { streams, subtitles } = await vimeo.resolveStreams(vimeoId);
