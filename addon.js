@@ -35,7 +35,7 @@ const MANIFEST = {
   // ID v2: al cambiarlo, Stremio lo trata como un add-on nuevo y descarta
   // cualquier caché de la versión anterior (streams vacíos, logo viejo).
   id: 'org.cinetucumano.stremio.v2',
-  version: '1.2.0',
+  version: '1.2.1',
   name: 'Cine Tucumano',
   description: 'Catálogo de películas y series de la plataforma web cinetucumano.com.ar',
   logo: LOGO_URL,
@@ -250,13 +250,22 @@ builder.defineStreamHandler(async (args) => {
   try {
     const { streams, subtitles } = await vimeo.resolveStreams(vimeoId);
 
-    const stremioStreams = streams.map((stream, index) => ({
+    const stremioStreams = streams.map((stream) => ({
       title: 'Cine Tucumano',
       name: stream.quality,
       description: `${type === 'series' ? 'Episodio' : 'Película'} vía cinetucumano.com.ar`,
       url: stream.url,
-      behaviorHints: index > 0 ? { notWebReady: true } : undefined,
-      subtitles: subtitles.length ? subtitles : undefined
+      // El esquema de Stremio exige notWebReady para URLs que no son MP4
+      // directo (nuestro HLS/m3u8): sin esto, los clientes descartan el stream.
+      behaviorHints: { notWebReady: true },
+      // El esquema Subtitle exige `id` (required); sin él la respuesta puede
+      // invalidarse entera.
+      subtitles: subtitles.map((sub, i) => ({
+        id: `ct-sub-${i}`,
+        url: sub.url,
+        lang: sub.lang,
+        label: sub.label
+      }))
     }));
 
     return { streams: stremioStreams };
