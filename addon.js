@@ -35,10 +35,13 @@ const PUBLIC_URL = (
 const LOGO_URL = `${PUBLIC_URL}/logo.png`;
 
 const MANIFEST = {
-  // ID v2: al cambiarlo, Stremio lo trata como un add-on nuevo y descarta
+  // ID v3: al cambiarlo, Stremio lo trata como un add-on nuevo y descarta
   // cualquier caché de la versión anterior (streams vacíos, logo viejo).
-  id: 'org.cinetucumano.stremio.v2',
-  version: '1.2.2',
+  // CRÍTICO: Stremio cachea el add-on por este ID; si queda el mismo ID de la
+  // versión rota, el cliente sigue mostrando "No se encontraron transmisiones"
+  // aunque el backend ya devuelva HLS. Cambiar el ID fuerza reinstalar.
+  id: 'org.cinetucumano.stremio.v3',
+  version: '1.3.0',
   name: 'Cine Tucumano',
   description: 'Catálogo de películas y series de la plataforma web cinetucumano.com.ar',
   logo: LOGO_URL,

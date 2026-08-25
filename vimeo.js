@@ -104,19 +104,69 @@ async function fetchWithJina(url) {
 
 const TRANSPORTS = { curl: fetchWithCurl, axios: fetchWithAxios, jina: fetchWithJina };
 
-// Orden de prueba de transportes. CT_RESOLVER permite forzar uno
-// (útil para diagnóstico: CT_RESOLVER=jina npm start).
+// Orden de carga. En Vercel (datacenter) curl y axios devuelven 401 por el
+// bloqueo de Vimeo, así que el único transporte fiable es jina. CT_RESOLVER
+// permite forzar uno (diagnóstico: CT_RESOLVER=jina npm start).
 let transportOrder = (process.env.CT_RESOLVER || 'curl,axios,jina').split(',');
 
 // Memoria del transporte que funcionó la última vez: en un mismo entorno
-// (ej. Vercel) el ganador siempre será el mismo, así que lo probamos primero
-// y ahorramos segundos de latencia en cada resolución.
+// (ej. Vercel) el ganador suele ser el mismo, así que lo probamos primero
+// y ahorramos latencia en cada resolución.
 let preferredTransport = null;
 
+/*
+ * Limiter para r.jina.ai (tier gratuito sin API key: ~20 req/minuto).
+ * ---------------------------------------------------------------------------
+ * Este relay es el único transporte que atraviesa el bloqueo de Vimeo desde
+ * IPs de datacenter (Vercel). Pero si Stremio pide varios streams a la vez
+ * (varias fichas, varios clientes), jina responde 429 / HTML sin playerConfig
+ * y TODOS los transportes fallan -> el addon devuelve externalUrl, que en
+ * Smart TV se descarta -> "No se encontraron transmisiones".
+ *
+ * Solución: serializamos las peticiones a jina con un espaciado mínimo
+ * (intervalMs). Nunca disparamos el rate limit del relay, así que evitamos
+ * esos falloss evitables.
+ */
+let jinaQueue = Promise.resolve();
+let jinaLastCalledAt = 0;
+const JINA_MIN_INTERVAL_MS = parseInt(process.env.JINA_INTERVAL_MS || '800', 10);
+
 /**
- * Descarga el HTML del player probando los transportes en orden hasta
- * obtener uno que traiga window.playerConfig (un 200 sin config no sirve:
- * puede ser la página del desafío Turnstile).
+ * Encadena la llamada a jina detrás de las anteriores (cola serial) y espera
+ * el espaciado mínimo. Devuelve el resultado del fetch o null.
+ */
+function throttledJina(url) {
+  const call = () =>
+    fetchWithJina(url).then((result) => {
+      jinaLastCalledAt = Date.now();
+      return result;
+    });
+  const run = jinaQueue.then(() => {
+    const wait = JINA_MIN_INTERVAL_MS - (Date.now() - jinaLastCalledAt);
+    return wait > 0 ? new Promise((r) => setTimeout(r, wait)).then(call) : call();
+  });
+  // Aun cuando una llamada previa falle, la cola nunca se rompe.
+  jinaQueue = run.catch(() => {});
+  return run;
+}
+
+/** True cuando el body del relay trae el player embeddings. */
+function hasPlayerConfig(result) {
+  return Boolean(result && result.status === 200 && result.body && result.body.includes('window.playerConfig'));
+}
+
+/** Reintento global para jina tras throttling, con backoff en ms. */
+let jinaRetries = 0;
+const JINA_BACKOFF_MS = parseInt(process.env.JINA_BACKOFF_MS || '1500', 10);
+
+/**
+ * Descarga el HTML del player probando transportes hasta encontrar uno que
+ * traiga window.playerConfig (un 200 sin config no sirve: es la página del
+ * desafío Turnstile). El transporte anterior ganador se prueba primero.
+ *
+ * Particularidad jina: si falla por throttling, se espera con backoff y se
+ * reencola UNA vez más antes de darte por vencido, para no devolver un
+ * fallback que el cliente Smart TV descarta.
  */
 async function downloadPlayerHtml(url) {
   const order = preferredTransport
@@ -126,12 +176,30 @@ async function downloadPlayerHtml(url) {
   for (const name of order) {
     const fetcher = TRANSPORTS[name];
     if (!fetcher) continue;
-    const result = await fetcher(url);
-    if (result && result.status === 200 && result.body && result.body.includes('window.playerConfig')) {
+    const result = name === 'jina' ? await throttledJina(url) : await fetcher(url);
+    if (hasPlayerConfig(result)) {
       preferredTransport = name;
       return result;
     }
   }
+
+  // Solo jina tiene reintento con backoff: los demás (curl/axios) devuelven
+  // 401 determinista en Vercel y reintentarlos no ayuda.
+  const orderHasJina = transportOrder.includes('jina') || preferredTransport === 'jina';
+  if (orderHasJina && jinaRetries < 3) {
+    jinaRetries += 1;
+    const delay = JINA_BACKOFF_MS * jinaRetries;
+    const retry = await new Promise((resolve) => {
+      setTimeout(() => resolve(throttledJina(url)), delay);
+    });
+    if (hasPlayerConfig(retry)) {
+      jinaRetries = 0;
+      preferredTransport = 'jina';
+      return retry;
+    }
+    if (jinaRetries >= 3) jinaRetries = 0;
+  }
+
   return null;
 }
 
