@@ -1,17 +1,30 @@
 /**
  * server.js
  * ---------------------------------------------------------------------------
- * Punto de entrada compatible con dos entornos:
+ * Punto de entrada único para tres entornos:
  *
- *  - Local:  `npm start` levanta el add-on con serveHTTP (modo desarrollo).
- *  - Vercel: exporta la función serverless que Vercel invocará por cada
- *            request. `getRouter()` devuelve una app express, que es
- *            directamente invocable como (req, res) => {...}.
+ *  - Render.com (producción): servicio web Node PERSISTENTE. Render define
+ *    la variable PORT y exige bindear a 0.0.0.0. Ventaja clave frente a las
+ *    serverless functions: el proceso vive entre requests, así que las cachés
+ *    en memoria (catálogo, streams resueltos, transporte ganador contra el
+ *    bloqueo de Vimeo) sobreviven y las respuestas son más rápidas.
+ *
+ *  - Vercel: exporta el handler ((req,res)) para la Serverless Function sin
+ *    escuchar puertos (Vercel inyecta VERCEL=1).
+ *
+ *  - Local: `npm start` levanta el mismo servidor HTTP (puerto 7000 por
+ *    defecto, override con PORT).
+ *
+ * Configuración sugerida en Render:
+ *   Build Command:     npm install
+ *   Start Command:     node server.js
+ *   Health Check Path: /manifest.json
  */
 
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
-const { getRouter, serveHTTP } = require('stremio-addon-sdk');
+const { getRouter } = require('stremio-addon-sdk');
 const addon = require('./addon');
 const vimeo = require('./vimeo');
 
@@ -50,41 +63,55 @@ function debugHandler(req, res) {
     });
 }
 
-// Cabeceras de caché en el CDN de Vercel: alivian las cold starts y reducen
-// el tráfico hacia cinetucumano.com.ar sin servir contenido rancio.
-// Los streams se cachean menos: sus URLs firmadas expiran en ~1 hora y durante
-// una incidencia no queremos servir respuestas vacías rancias.
-function withCacheHeaders(handler) {
-  return function (req, res) {
-    const urlPath = (req.url || '').split('?')[0];
-    if (urlPath === '/debug') return debugHandler(req, res);
-    if (urlPath === '/logo.png') return logoHandler(req, res);
-    if (urlPath.startsWith('/stream/')) {
-      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=120');
-    } else {
-      res.setHeader(
-        'Cache-Control',
-        'public, max-age=300, s-maxage=600, stale-while-revalidate=3600'
-      );
-    }
-    return handler(req, res);
-  };
+/** Estado simple del servicio (útil como healthcheck alternativo). */
+function statusHandler(res) {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.end(
+    JSON.stringify({
+      ok: true,
+      service: 'cinetucumano-stremio',
+      manifest: '/manifest.json'
+    })
+  );
 }
 
-if (IS_VERCEL) {
-  // Exportamos la función para las Serverless Functions de Vercel.
-  // El router del SDK tiene firma (req, res, next): le pasamos un
-  // callback final que responde 404 si ninguna ruta coincidió.
-  module.exports = withCacheHeaders((req, res) => {
-    router(req, res, () => {
-      res.statusCode = 404;
-      res.end('Not found');
-    });
+// Cabeceras de caché: alivian la carga sin servir contenido rancio.
+// Los streams se cachean poco: sus URLs firmadas expiran en ~1 hora.
+function requestHandler(req, res) {
+  const urlPath = (req.url || '').split('?')[0];
+  if (urlPath === '/') return statusHandler(res);
+  if (urlPath === '/debug') return debugHandler(req, res);
+  if (urlPath === '/logo.png') return logoHandler(req, res);
+  if (urlPath.startsWith('/stream/')) {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=120');
+  } else {
+    res.setHeader(
+      'Cache-Control',
+      'public, max-age=300, s-maxage=600, stale-while-revalidate=3600'
+    );
+  }
+  // El router del SDK tiene firma (req, res, next): respondemos 404 si
+  // ninguna ruta coincidió.
+  return router(req, res, () => {
+    res.statusCode = 404;
+    res.end('Not found');
   });
-} else {
-  // Desarrollo local: exportamos también por si se requiere integrar
-  // en otro servidor, y arrancamos el listener interactivo del SDK
-  // (serveHTTP espera el AddonInterface, no el router).
-  module.exports = router;
-  serveHTTP(addon, { port: process.env.PORT || 7000 });
+}
+
+module.exports = requestHandler;
+
+/* Arranque del proceso (Render y local). En Vercel NO se escucha puerto. */
+if (!IS_VERCEL && !process.env.CT_NO_LISTEN) {
+  const port = parseInt(process.env.PORT, 10) || 7000;
+  http
+    .createServer(requestHandler)
+    .listen(port, '0.0.0.0', () => {
+      console.log(`[cinetucumano-stremio] escuchando en 0.0.0.0:${port}`);
+      console.log('[cinetucumano-stremio] manifest: /manifest.json');
+    })
+    .on('error', (err) => {
+      console.error('[cinetucumano-stremio] error fatal del servidor:', err.message);
+      process.exit(1);
+    });
 }
