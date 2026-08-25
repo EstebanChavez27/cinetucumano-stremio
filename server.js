@@ -27,6 +27,7 @@ const path = require('path');
 const { getRouter } = require('stremio-addon-sdk');
 const addon = require('./addon');
 const vimeo = require('./vimeo');
+const scraper = require('./scraper');
 
 const router = getRouter(addon);
 
@@ -107,6 +108,48 @@ function statusHandler(res) {
   );
 }
 
+/* -------------------------------------------------------------------------- */
+/* Prefetch de streams al pedir el catálogo                                    */
+/* -------------------------------------------------------------------------- */
+/* La primera resolución de un video puede tardar varios segundos (cadena de   */
+/* transportes contra el bloqueo de Vimeo) y algunos clientes se rinden antes. */
+/* Cuando alguien navega el catálogo, pre-resolvemos en background los streams */
+/* de las primeras N películas: cuando hace clic, ya están en caché.           */
+/* Solo en procesos persistentes (Render/local); en Vercel el fire-and-forget  */
+/* muere al terminar el request.                                               */
+
+const WARM_LIMIT = parseInt(process.env.CT_WARM_LIMIT, 10) || 10;
+const WARM_DELAY_MS = 900; // respeta el rate limit del relay (~20 req/min)
+const warmed = new Set();
+let warming = false;
+
+function scheduleWarmup() {
+  if (IS_VERCEL || warming || WARM_LIMIT <= 0) return;
+  warming = true;
+  setTimeout(async () => {
+    try {
+      const movies = await scraper.getMovies();
+      const pending = movies
+        .map((m) => String(m.vimeoId))
+        .filter((id) => /^\d+$/.test(id) && !warmed.has(id))
+        .slice(0, WARM_LIMIT);
+      for (const id of pending) {
+        warmed.add(id);
+        console.log(`[warmup] pre-resolviendo ct_${id}`);
+        vimeo.resolveStreams(id).catch(() => {
+          // Si falla, permitir reintento en un próximo catálogo.
+          warmed.delete(id);
+        });
+        await new Promise((r) => setTimeout(r, WARM_DELAY_MS));
+      }
+    } catch {
+      // El catálogo falló: no pasa nada, se reintenta en la próxima request.
+    } finally {
+      warming = false;
+    }
+  }, 50);
+}
+
 // Cabeceras de caché: alivian la carga sin servir contenido rancio.
 // Los streams se cachean poco: sus URLs firmadas expiran en ~1 hora.
 function requestHandler(req, res) {
@@ -138,6 +181,8 @@ function requestHandler(req, res) {
   if (urlPath === '/manifest.json') return manifestHandler(req, res);
   if (urlPath === '/debug') return debugHandler(req, res);
   if (urlPath === '/logo.png') return logoHandler(req, res);
+  // Navegó el catálogo => precalentar streams en background.
+  if (urlPath.startsWith('/catalog/')) scheduleWarmup();
   if (urlPath.startsWith('/stream/')) {
     res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=120');
   } else {

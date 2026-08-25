@@ -44,7 +44,8 @@
  * Blindaje adicional:
  *   - Detección explícita de páginas-desafío (Turnstile / "Just a moment"):
  *     un 200 sin playerConfig cuenta como fallo del transporte.
- *   - Caché positiva de streams (10 min; las URLs firmadas viven ~1h).
+ *   - Caché positiva de streams (50 min + 10 min stale; las URLs firmadas
+ *     viven ~1h) con refresco en background (stale-while-revalidate).
  *   - Caché negativa de errores (45 s): si todo falló, no se machaca a
  *     Vimeo con reintentos instantáneos (evita agravar el throttle por IP).
  *   - Deduplicación: nunca dos resoluciones iguales en vuelo a la vez.
@@ -59,7 +60,10 @@ const execFileAsync = promisify(execFile);
 
 /* ----------------------------- Configuración ----------------------------- */
 
-const CACHE_TTL = 10 * 60 * 1000;
+// Las URLs firmadas de vimeocdn viven ~66 min desde la resolución: un TTL de
+// 50 min + 10 min de ventana stale mantiene siempre URLs vigentes.
+const CACHE_TTL = 50 * 60 * 1000;
+const STALE_EXTRA_MS = 10 * 60 * 1000;
 const FAIL_TTL = 45 * 1000;
 
 // Cooldown por transporte: jina es caro (rate limit), se castiga más tiempo.
@@ -425,50 +429,75 @@ function extractSubtitles(playerConfig) {
 
 /* ------------------------------ API pública ------------------------------- */
 
+/** Resolución completa por red (sin cachés). */
+async function produceStreams(id) {
+  const pageUrl = await playerPageUrlFor(id);
+  const config = parsePlayerConfig((await downloadPlayerHtml(pageUrl)).html);
+  if (!config) {
+    throw new Error(`${id}: playerConfig no encontrado (desafío de Vimeo/Cloudflare)`);
+  }
+
+  const streams = extractStreams(config);
+  if (!streams.length) {
+    throw new Error(`${id}: playerConfig sin archivos reproducibles`);
+  }
+
+  return {
+    streams: streams.map((f) => ({ quality: f.quality, url: f.url })),
+    subtitles: extractSubtitles(config),
+    duration: config.video ? config.video.duration : null
+  };
+}
+
+/**
+ * Lanza la resolución, guarda el resultado (o el error) en las cachés y
+ * deduplica contra otras llamadas en vuelo para el mismo video.
+ */
+function cacheProduce(id) {
+  const promise = produceStreams(id)
+    .then((value) => {
+      streamCache.set(id, { value, expires: Date.now() + CACHE_TTL });
+      failCache.delete(id);
+      return value;
+    })
+    .catch((err) => {
+      // Caché negativa corta: Stremio reintenta al instante y machacar a
+      // Vimeo durante un throttle por IP solo prolonga el bloqueo.
+      streamCache.delete(id);
+      failCache.set(id, { message: err.message, expires: Date.now() + FAIL_TTL });
+      throw err;
+    });
+  inFlight.set(id, promise);
+  promise
+    .catch(() => {})
+    .then(() => {
+      inFlight.delete(id);
+    });
+  return promise;
+}
+
 async function resolveStreams(vimeoId) {
   const id = idOf(vimeoId);
 
   const hit = streamCache.get(id);
   if (hit && hit.expires > Date.now()) return hit.value;
 
+  // Stale-while-revalidate: si la entrada venció hace poco se sirve al
+  // instante (las URLs firmadas viven ~1h, mucho más que el TTL) y se
+  // refresca en background. Evita que el cliente espere una resolución
+  // completa tras un rato de inactividad.
+  if (hit && !hit.refreshing && Date.now() - hit.expires <= STALE_EXTRA_MS) {
+    hit.refreshing = true;
+    cacheProduce(id); // fire & forget: repone la caché
+    return hit.value;
+  }
+
   const failed = failCache.get(id);
   if (failed && failed.expires > Date.now()) throw new Error(failed.message);
 
   if (inFlight.has(id)) return inFlight.get(id);
 
-  const promise = (async () => {
-    const pageUrl = await playerPageUrlFor(id);
-    const config = parsePlayerConfig((await downloadPlayerHtml(pageUrl)).html);
-    if (!config) {
-      throw new Error(`${id}: playerConfig no encontrado (desafío de Vimeo/Cloudflare)`);
-    }
-
-    const streams = extractStreams(config);
-    if (!streams.length) {
-      throw new Error(`${id}: playerConfig sin archivos reproducibles`);
-    }
-
-    const value = {
-      streams: streams.map((f) => ({ quality: f.quality, url: f.url })),
-      subtitles: extractSubtitles(config),
-      duration: config.video ? config.video.duration : null
-    };
-    streamCache.set(id, { value, expires: Date.now() + CACHE_TTL });
-    failCache.delete(id);
-    return value;
-  })();
-
-  inFlight.set(id, promise);
-  try {
-    return await promise;
-  } catch (err) {
-    // Caché negativa corta: Stremio reintenta al instante y machacar a Vimeo
-    // durante un throttle por IP solo prolonga el bloqueo.
-    failCache.set(id, { message: err.message, expires: Date.now() + FAIL_TTL });
-    throw err;
-  } finally {
-    inFlight.delete(id);
-  }
+  return cacheProduce(id);
 }
 
 /** URL del player público (para diagnóstico y referencia). */
