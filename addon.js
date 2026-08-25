@@ -315,21 +315,8 @@ builder.defineStreamHandler(async (args) => {
 
     return { streams: stremioStreams };
   } catch (err) {
-    // Vimeo bloquea la resolución server-side desde IPs de datacenter
-    // (Cloudflare Turnstile). Fallback: reproducir en el navegador, donde
-    // el player de Vimeo funciona sin restricciones.
-    console.error(`[stream] HLS no disponible para ${id} (${err.message}); usando fallback externo`);
-    const embedUrl = await vimeo.getEmbedUrl(vimeoId);
-    return {
-      streams: [
-        {
-          title: 'Cine Tucumano\nVer en el navegador (Vimeo)',
-          name: 'Vimeo',
-          description: 'Reproducción externa: el servidor no puede resolver HLS desde su IP',
-          externalUrl: embedUrl
-        }
-      ]
-    };
+    console.error(`[stream] HLS no disponible para ${id} (${err.message})`);
+    return { streams: [] };
   }
 });
 
