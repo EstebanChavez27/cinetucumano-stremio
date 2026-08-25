@@ -63,6 +63,37 @@ function debugHandler(req, res) {
     });
 }
 
+/**
+ * Manifiesto con logo DINÁMICO: se sirve desde el mismo host que recibe la
+ * petición (Render, Vercel o local). Antes estaba hardcodeado a Vercel, lo
+ * que generaba manifests mezclados entre deployments. Override opcional con
+ * ADDON_PUBLIC_URL.
+ */
+function manifestHandler(req, res) {
+  const explicit = process.env.ADDON_PUBLIC_URL;
+  let base;
+  if (explicit) {
+    base = explicit.replace(/\/$/, '');
+  } else {
+    const proto = String(
+      req.headers['x-forwarded-proto'] || (IS_VERCEL ? 'https' : 'http')
+    )
+      .split(',')[0]
+      .trim();
+    const host = String(
+      req.headers['x-forwarded-host'] || req.headers.host || ''
+    )
+      .split(',')[0]
+      .trim();
+    base = `${proto}://${host}`;
+  }
+  const logoUrl = `${base}/logo.png`;
+  const manifest = { ...addon.manifest, logo: logoUrl, background: logoUrl };
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.end(JSON.stringify(manifest));
+}
+
 /** Estado simple del servicio (útil como healthcheck alternativo). */
 function statusHandler(res) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -81,6 +112,7 @@ function statusHandler(res) {
 function requestHandler(req, res) {
   const urlPath = (req.url || '').split('?')[0];
   if (urlPath === '/') return statusHandler(res);
+  if (urlPath === '/manifest.json') return manifestHandler(req, res);
   if (urlPath === '/debug') return debugHandler(req, res);
   if (urlPath === '/logo.png') return logoHandler(req, res);
   if (urlPath.startsWith('/stream/')) {
